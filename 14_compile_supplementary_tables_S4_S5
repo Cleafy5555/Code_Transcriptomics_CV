@@ -1,0 +1,100 @@
+# ============================================================================
+# Chapter 3 | Compile Supplementary Tables S4 and S5
+# ============================================================================
+# Purpose:
+# - Build the supplementary tables associated with the overlap analysis and targeted pathway heatmap.
+# - Join overlap classes and targeted genes back to annotation and log2FC information.
+# - Export polished Excel workbooks for supplementary materials.
+#
+# Main inputs:
+# - overlap outputs from Script 06
+# - targeted pathway outputs from Scripts 12 and 13
+# - updated DEG annotation tables
+#
+# Main outputs:
+# - Supplementary Tables S4 and S5 as Excel workbooks.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(readr)
+  library(readxl)
+  library(openxlsx)
+  library(purrr)
+})
+
+# ---------- S4 ----------
+overlap_dir <- file.path("outputs", "intermediate", "overlap_stage_vs_control")
+annot_file <- file.path("outputs", "intermediate", "go_mapping", "merged_outputs", "DEG_main_contrasts_XP_LOC_conversion_table_UPDATED.csv")
+out_file_s4 <- file.path("outputs", "tables", "14_Supplementary_Table_S4_compiled.xlsx")
+dir.create(dirname(out_file_s4), recursive = TRUE, showWarnings = FALSE)
+
+annot <- read_csv(annot_file, show_col_types = FALSE, col_types = cols(.default = col_character())) %>%
+  mutate(genotype = recode(genotype, "GaiLan" = "Gai-lan"),
+         stage = case_when(str_detect(contrast, "Spore_adhesion") ~ "Spore adhesion",
+                           str_detect(contrast, "ESP") ~ "ESP",
+                           str_detect(contrast, "MSP") ~ "MSP",
+                           TRUE ~ NA_character_))
+
+for (cc in intersect(c("baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"), names(annot))) annot[[cc]] <- as.numeric(annot[[cc]])
+annot_meta <- annot %>% select(any_of(c("gene", "xp_id", "xp_base", "loc_id", "protein_description"))) %>% distinct()
+annot_lfc <- annot %>% filter(!is.na(stage)) %>% group_by(stage, gene, genotype) %>% summarise(log2FoldChange = mean(log2FoldChange, na.rm = TRUE), .groups = "drop") %>%
+  mutate(colname = paste0("log2FC_", genotype)) %>% select(stage, gene, colname, log2FoldChange) %>% pivot_wider(names_from = colname, values_from = log2FoldChange)
+
+gene_files <- list.files(overlap_dir, pattern = "^genes_all_.*\\.csv$", full.names = TRUE)
+parse_stage <- function(fname) case_when(str_detect(fname, "Spore_adhesion") ~ "Spore adhesion", str_detect(fname, "ESP") ~ "ESP", str_detect(fname, "MSP") ~ "MSP", TRUE ~ NA_character_)
+parse_overlap_class <- function(fname) case_when(
+  str_detect(fname, "shared_all_three") ~ "shared_all_three",
+  str_detect(fname, "shared_broccolini_broccoli") ~ "shared_broccolini_broccoli",
+  str_detect(fname, "shared_broccolini_gailan") ~ "shared_broccolini_gailan",
+  str_detect(fname, "shared_broccoli_gailan") ~ "shared_broccoli_gailan",
+  str_detect(fname, "unique_broccolini") ~ "unique_broccolini",
+  str_detect(fname, "unique_broccoli") ~ "unique_broccoli",
+  str_detect(fname, "unique_gailan") ~ "unique_gailan",
+  TRUE ~ NA_character_)
+
+gene_long <- purrr::map_dfr(gene_files, function(f) {
+  fname <- basename(f)
+  read_csv(f, show_col_types = FALSE) %>%
+    rename(gene = gene) %>%
+    mutate(source_file = fname, stage = parse_stage(fname), overlap_class = parse_overlap_class(fname))
+})
+
+s4_long <- gene_long %>% left_join(annot_meta, by = "gene") %>% left_join(annot_lfc, by = c("stage", "gene"))
+wb4 <- createWorkbook(); addWorksheet(wb4, "S4_shared_unique_all"); writeData(wb4, "S4_shared_unique_all", s4_long); freezePane(wb4, "S4_shared_unique_all", firstRow = TRUE); setColWidths(wb4, "S4_shared_unique_all", cols = 1:ncol(s4_long), widths = "auto"); saveWorkbook(wb4, out_file_s4, overwrite = TRUE)
+
+# ---------- S5 ----------
+selected_file <- file.path("outputs", "stats", "13_figure5_selected_genes.csv")
+deg_file <- annot_file
+go_file <- file.path("outputs", "intermediate", "go_mapping", "merged_outputs", "XP_LOC_GO_master_conversion_table_UPDATED.csv")
+out_file_s5 <- file.path("outputs", "tables", "14_Supplementary_Table_S5_compiled.xlsx")
+
+selected <- read_csv(selected_file, show_col_types = FALSE)
+deg <- read_csv(deg_file, show_col_types = FALSE)
+go_tbl <- read_csv(go_file, show_col_types = FALSE)
+for (cc in intersect(c("baseMean", "log2FoldChange", "lfcSE", "stat", "pvalue", "padj"), names(deg))) deg[[cc]] <- as.numeric(deg[[cc]])
+
+deg <- deg %>% mutate(genotype = recode(genotype, "GaiLan" = "Gai-lan"),
+                      stage = case_when(str_detect(contrast, "Spore_adhesion") ~ "Spore adhesion", str_detect(contrast, "ESP") ~ "ESP", str_detect(contrast, "MSP") ~ "MSP", TRUE ~ NA_character_))
+selected <- selected %>% select(any_of(c("xp_base", "pathway", "short_label"))) %>% distinct()
+deg_meta <- deg %>% select(any_of(c("xp_base", "xp_id", "loc_id", "protein_description"))) %>% distinct()
+retained_contrasts <- deg %>% filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  select(xp_base, genotype, contrast, stage) %>% distinct() %>%
+  mutate(contrast_label = case_when(
+    contrast == "Spore_adhesion_vs_Control" ~ paste0(genotype, " Spore vs control"),
+    contrast == "ESP_vs_Control" ~ paste0(genotype, " ESP vs control"),
+    contrast == "MSP_vs_Control" ~ paste0(genotype, " MSP vs control"),
+    TRUE ~ paste(genotype, contrast)
+  )) %>% group_by(xp_base) %>% summarise(retained_contrasts_significant = paste(sort(unique(contrast_label)), collapse = "; "), .groups = "drop")
+go_collapsed <- go_tbl %>% select(any_of(c("xp_base", "GO_ID", "Aspect"))) %>% filter(!is.na(xp_base)) %>% distinct() %>% group_by(xp_base) %>% summarise(GO_ID = paste(sort(unique(na.omit(GO_ID))), collapse = "; "), GO_aspect = paste(sort(unique(na.omit(Aspect))), collapse = "; "), .groups = "drop")
+s5 <- selected %>% left_join(deg_meta, by = "xp_base") %>% left_join(retained_contrasts, by = "xp_base") %>% left_join(go_collapsed, by = "xp_base")
+wb5 <- createWorkbook(); addWorksheet(wb5, "S5_targeted_pathway_genes"); writeData(wb5, "S5_targeted_pathway_genes", s5); freezePane(wb5, "S5_targeted_pathway_genes", firstRow = TRUE); setColWidths(wb5, "S5_targeted_pathway_genes", cols = 1:ncol(s5), widths = "auto"); saveWorkbook(wb5, out_file_s5, overwrite = TRUE)

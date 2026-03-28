@@ -1,0 +1,77 @@
+# ============================================================================
+# Chapter 3 | Compile pathogen supplementary tables
+# ============================================================================
+# Purpose:
+# - Gather the pathogen exploratory outputs into supplementary workbooks.
+# - Export figure-support tables for the pathogen PCA, heatmap, gene clusters, and QC summaries.
+#
+# Main inputs:
+# - pathogen outputs from Scripts 15 and 16
+#
+# Main outputs:
+# - Supplementary Tables S6 and S7 as Excel workbooks.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(readxl)
+  library(dplyr)
+  library(stringr)
+  library(openxlsx)
+  library(tibble)
+})
+
+base_dir <- file.path("outputs", "intermediate", "pathogen_exploratory", "chosen_analysis_pathogen_exploratory")
+out_file_s6 <- file.path("outputs", "tables", "17_Supplementary_Table_S6_compiled.xlsx")
+out_file_s7 <- file.path("outputs", "tables", "17_Supplementary_Table_S7_compiled.xlsx")
+dir.create(dirname(out_file_s6), recursive = TRUE, showWarnings = FALSE)
+
+read_any <- function(path) {
+  ext <- tolower(tools::file_ext(path))
+  if (ext == "csv") read_csv(path, show_col_types = FALSE)
+  else if (ext %in% c("tsv", "txt")) read_tsv(path, show_col_types = FALSE)
+  else if (ext %in% c("xlsx", "xls")) read_excel(path)
+  else stop("Unsupported file type: ", path)
+}
+clean_colnames <- function(df) { names(df) <- names(df) |> str_trim() |> str_replace_all("\\s+", "_"); df }
+read_named_df <- function(fname) read_any(file.path(base_dir, fname)) %>% clean_colnames()
+
+pca_df <- read_named_df("pathogen_PCA_data.csv")
+var_tbl <- read_named_df("pathogen_gene_variance_ranked.csv")
+cluster_tbl <- read_named_df("pathogen_gene_clusters.csv")
+top_per_cluster <- read_named_df("pathogen_top15_genes_per_cluster.csv")
+z_tbl <- read_named_df("pathogen_top_variable_genes_zscore.csv")
+qc_tbl <- if (file.exists(file.path(base_dir, "pathogen_sample_qc_summary.csv"))) read_named_df("pathogen_sample_qc_summary.csv") else tibble(note = "QC file not found")
+
+wb6 <- createWorkbook()
+addWorksheet(wb6, "PCA_coordinates"); writeData(wb6, "PCA_coordinates", pca_df)
+addWorksheet(wb6, "Heatmap_zscore_matrix"); writeData(wb6, "Heatmap_zscore_matrix", z_tbl)
+addWorksheet(wb6, "Gene_variance_ranked"); writeData(wb6, "Gene_variance_ranked", var_tbl)
+addWorksheet(wb6, "Gene_clusters"); writeData(wb6, "Gene_clusters", cluster_tbl)
+addWorksheet(wb6, "Pathogen_sample_QC"); writeData(wb6, "Pathogen_sample_QC", qc_tbl)
+saveWorkbook(wb6, out_file_s6, overwrite = TRUE)
+
+sample_metadata_all <- read_named_df("sample_metadata_all_selected.csv")
+sample_metadata_inoc <- read_named_df("sample_metadata_inoculated_only.csv")
+counts_merged <- read_named_df("counts_matrix_merged.csv")
+norm_counts <- read_named_df("pathogen_normalized_counts.csv")
+vst_counts <- if (file.exists(file.path(base_dir, "pathogen_vst_counts.csv"))) read_named_df("pathogen_vst_counts.csv") else tibble(note = "VST file not found")
+wb7 <- createWorkbook()
+addWorksheet(wb7, "sample_metadata_all"); writeData(wb7, "sample_metadata_all", sample_metadata_all)
+addWorksheet(wb7, "sample_metadata_inoculated"); writeData(wb7, "sample_metadata_inoculated", sample_metadata_inoc)
+addWorksheet(wb7, "counts_matrix_merged"); writeData(wb7, "counts_matrix_merged", counts_merged)
+addWorksheet(wb7, "normalized_counts"); writeData(wb7, "normalized_counts", norm_counts)
+addWorksheet(wb7, "vst_counts"); writeData(wb7, "vst_counts", vst_counts)
+addWorksheet(wb7, "PCA_coordinates"); writeData(wb7, "PCA_coordinates", pca_df)
+addWorksheet(wb7, "gene_variance_ranked"); writeData(wb7, "gene_variance_ranked", var_tbl)
+addWorksheet(wb7, "gene_clusters"); writeData(wb7, "gene_clusters", cluster_tbl)
+addWorksheet(wb7, "top15_per_cluster"); writeData(wb7, "top15_per_cluster", top_per_cluster)
+addWorksheet(wb7, "top_variable_zscore"); writeData(wb7, "top_variable_zscore", z_tbl)
+saveWorkbook(wb7, out_file_s7, overwrite = TRUE)

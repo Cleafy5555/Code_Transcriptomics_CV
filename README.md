@@ -1,6 +1,6 @@
-# Chapter 3 transcriptomics analysis code
+# Transcriptomics analysis
 
-Annotated R analysis scripts for Chapter 3 of the thesis on stage-aligned transcriptomics of early clubroot infection in broccoli, broccolini, and gai-lan.
+This repository contains cleaned and annotated R scripts for the paper "COMPARATIVE TRANSCRIPTOMICS OF EARLY CLUBROOT INFECTION REVEALS DISTINCT HOST REPROGRAMMING IN BROCCOLI, BROCCOLINI AND GAI-LAN".
 
 This repository contains cleaned code only. Raw sequencing/count files and large external annotation resources are not included.
 

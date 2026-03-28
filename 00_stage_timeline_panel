@@ -1,0 +1,90 @@
+# ============================================================================
+# Chapter 3 | Figure 1 panel J stage-alignment timeline
+# ============================================================================
+# Purpose:
+# - Build the simple timeline panel showing the microscopy-defined stage alignment used in the chapter.
+# - Plot the DPI values selected for Broccolini, Broccoli, and Gai-lan.
+# - Export publication-ready PNG and PDF versions of the panel.
+#
+# Main inputs:
+# - Hard-coded stage timeline values taken from the chapter design.
+#
+# Main outputs:
+# - outputs/figures/00_stage_timeline_panel.png
+# - outputs/figures/00_stage_timeline_panel.pdf
+#
+# Notes:
+# - This is a figure-construction script rather than a statistical analysis script.
+# - The values are fixed by the experimental design and microscopy stage assignments.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tibble)
+})
+
+fig_dir <- file.path("outputs", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+# This panel is hand-defined because it is a summary figure rather than
+# something derived directly from an input table.
+panelJ <- tibble::tribble(
+  ~Host,         ~Stage,   ~DPI,
+  "Broccolini",  "Spores",  1,
+  "Broccolini",  "ESP",    13,
+  "Broccolini",  "MSP",    22,
+  "Broccoli",    "Spores",  2,
+  "Broccoli",    "ESP",    16,
+  "Broccoli",    "MSP",    25,
+  "Gai-lan",     "Spores",  7,
+  "Gai-lan",     "ESP",    22,
+  "Gai-lan",     "MSP",    28
+)
+
+panelJ$Host <- factor(panelJ$Host, levels = c("Broccolini", "Broccoli", "Gai-lan"))
+panelJ$Stage <- factor(panelJ$Stage, levels = c("Spores", "ESP", "MSP"))
+
+pJ <- ggplot(panelJ, aes(x = DPI, y = Host, colour = Stage)) +
+  geom_segment(
+    data = distinct(panelJ, Host),
+    aes(x = 0, xend = 30, y = Host, yend = Host),
+    inherit.aes = FALSE,
+    linewidth = 0.6,
+    colour = "grey75"
+  ) +
+  geom_point(size = 4) +
+  geom_text(
+    aes(label = DPI),
+    nudge_y = 0.42,
+    colour = "black",
+    size = 3.5,
+    show.legend = FALSE
+  ) +
+  scale_x_continuous(
+    limits = c(0, 30),
+    breaks = seq(0, 30, by = 5),
+    expand = c(0, 0)
+  ) +
+  scale_colour_manual(
+    values = c("Spores" = "#FBACBE", "ESP" = "#B9D2B1", "MSP" = "#A18276")
+  ) +
+  labs(x = "Days post inoculation (DPI)", y = NULL, colour = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "top",
+    legend.justification = "left",
+    legend.box = "horizontal",
+    plot.margin = margin(5.5, 10, 5.5, 5.5)
+  )
+
+ggsave(file.path(fig_dir, "00_figure1_panelJ_timeline.png"), pJ, width = 6, height = 2.0, dpi = 600, bg = "white")
+ggsave(file.path(fig_dir, "00_figure1_panelJ_timeline.pdf"), pJ, width = 6, height = 2.0, bg = "white")

@@ -1,0 +1,59 @@
+# ============================================================================
+# Chapter 3 | Identify targeted pathway candidate genes
+# ============================================================================
+# Purpose:
+# - Search the annotated DEG table for genes linked to pre-defined biological themes.
+# - Build candidate lists for hormone/defence signalling, cell wall remodelling, carbohydrate/sink metabolism, CAZymes, and cytoskeleton terms.
+# - Save both broad candidate sets and significance-filtered subsets.
+#
+# Main inputs:
+# - updated DEG annotation table
+#
+# Main outputs:
+# - targeted candidate gene lists and pathway summary counts.
+#
+# Notes:
+# - This is a keyword-driven candidate discovery step used to support the final targeted heatmap.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+})
+
+infile <- file.path("outputs", "intermediate", "go_mapping", "merged_outputs", "DEG_main_contrasts_XP_LOC_conversion_table_UPDATED.csv")
+out_dir <- file.path("outputs", "intermediate", "targeted_pathways")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+deg <- read_csv(infile, show_col_types = FALSE)
+deg2 <- deg %>%
+  mutate(genotype = recode(genotype, "GaiLan" = "Gai-lan"),
+         annotation_text = str_to_lower(paste(coalesce(protein_description, ""), coalesce(GO_ID, ""), coalesce(Evidence, ""), coalesce(Aspect, ""), sep = " ")))
+
+kw_ja <- c("jasmon", "lipoxygenase", "allene oxide", "jaz", "myc2", "defence", "defense", "fungus", "chitin", "wrky", "ethylene", "salicy", "abscis", "hormone")
+kw_wall <- c("cell wall", "pectin", "expansin", "xyloglucan", "cellulose", "lignin", "peroxidase", "callose", "wall-associated", "arabinogalactan")
+kw_carb <- c("sucrose", "sugar", "starch", "invertase", "hexose", "trehalose", "glycolysis", "transporter", "sweet", "sink", "carbon")
+kw_cazy <- c("glycoside hydrolase", "glycosyltransferase", "glycosyl transferase", "polysaccharide lyase", "carbohydrate esterase", "auxiliary activity", "pectinesterase", "pectin methylesterase", "pectate lyase", "pectate", "polygalacturonase", "endoglucanase", "cellulase", "glucanase", "beta-glucosidase", "xylanase", "xylosidase", "mannosidase", "arabinofuranosidase", "galactosidase", "glucosyltransferase", "carbohydrate-binding module", "\\bcbm\\b", "\\bgh\\b", "\\bgt\\b", "\\bpl\\b", "\\bce\\b", "\\baa\\b")
+kw_cyto <- c("\\bactin\\b", "\\bactin-related\\b", "\\bactin-binding\\b", "\\bactin depolymerizing factor\\b", "\\bactin depolymerising factor\\b", "\\badf\\b", "\\btubulin\\b", "\\balpha-tubulin\\b", "\\bbeta-tubulin\\b", "\\bmicrotubule\\b", "\\bmicrofilament\\b", "\\bcytoskeleton\\b", "\\bprofilin\\b", "\\bformin\\b", "\\bformin-like\\b", "\\bvillin\\b", "\\bkinesin\\b", "\\bkinesin-like\\b", "\\bmyosin\\b", "\\bdynein\\b", "\\bmicrotubule-associated\\b", "\\bspindle\\b", "\\bphragmoplast\\b")
+make_pattern <- function(x) paste(x, collapse = "|")
+
+deg_path <- bind_rows(
+  deg2 %>% filter(str_detect(annotation_text, regex(make_pattern(kw_ja), ignore_case = TRUE)))   %>% mutate(pathway = "Jasmonate / defence"),
+  deg2 %>% filter(str_detect(annotation_text, regex(make_pattern(kw_wall), ignore_case = TRUE))) %>% mutate(pathway = "Cell wall remodelling"),
+  deg2 %>% filter(str_detect(annotation_text, regex(make_pattern(kw_carb), ignore_case = TRUE))) %>% mutate(pathway = "Carbohydrate / sink metabolism"),
+  deg2 %>% filter(str_detect(annotation_text, regex(make_pattern(kw_cazy), ignore_case = TRUE))) %>% mutate(pathway = "CAZymes"),
+  deg2 %>% filter(str_detect(annotation_text, regex(make_pattern(kw_cyto), ignore_case = TRUE))) %>% mutate(pathway = "Cytoskeleton / actin-tubulin")
+) %>% distinct(genotype, contrast, gene, xp_base, protein_description, log2FoldChange, padj, pathway, .keep_all = TRUE)
+
+write_csv(deg_path, file.path(out_dir, "12_targeted_pathway_candidate_genes.csv"))
+write_csv(deg_path %>% filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1), file.path(out_dir, "12_targeted_pathway_candidate_genes_sig.csv"))
+write_csv(deg_path %>% filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>% count(pathway, contrast, genotype, name = "n_hits"), file.path(out_dir, "12_targeted_pathway_candidate_summary.csv"))

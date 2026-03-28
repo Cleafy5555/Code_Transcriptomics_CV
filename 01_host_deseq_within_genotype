@@ -1,0 +1,201 @@
+# ============================================================
+# Chapter 3 | Host DESeq2 within genotype against control baseline
+# ============================================================
+# Purpose:
+# 1. Read all CLC count files.
+# 2. Parse sample names into genotype, DPI, replicate, and infection status.
+# 3. Reconstruct stage-aligned metadata.
+# 4. Restrict the count matrix to host genes (XP_).
+# 5. Run DESeq2 separately within each genotype using Control as the baseline.
+# 6. Export full, significant, upregulated, and downregulated DEG tables.
+# 7. Save genotype-specific PCA plots and a combined summary table.
+#
+# Key design choice:
+# The DE model is run *within genotype* with design = ~ stage, so each host
+# background is analysed separately rather than forcing a global genotype-by-stage
+# model. This matches the chapter framing and simplifies control-referenced contrasts.
+# ============================================================
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(tibble)
+  library(purrr)
+  library(ggplot2)
+})
+
+count_dir <- file.path("data", "raw", "CLC_counts")
+base_out  <- file.path("outputs", "intermediate", "host_deseq_within_genotype")
+dir.create(base_out, recursive = TRUE, showWarnings = FALSE)
+
+files_all <- list.files(count_dir, pattern = "\\.csv$", full.names = TRUE)
+stopifnot(length(files_all) > 0)
+sample_names_all <- tools::file_path_sans_ext(basename(files_all))
+
+read_clc_counts <- function(file) {
+  sample_name <- tools::file_path_sans_ext(basename(file))
+  df <- read_csv(file, show_col_types = FALSE) %>% as_tibble()
+  needed <- c("Name", "Total gene reads")
+  if (!all(needed %in% names(df))) stop("Missing required columns in: ", basename(file))
+  df <- df %>% select(Name, `Total gene reads`)
+  names(df)[2] <- sample_name
+  df
+}
+
+count_list_all <- lapply(files_all, read_clc_counts)
+names(count_list_all) <- sample_names_all
+
+parse_sample_name <- function(x) {
+  is_extra <- str_detect(x, "_extra$")
+  x_base <- str_remove(x, "_extra$")
+
+  if (str_detect(x_base, "^A[BIK][0-9]+$")) {
+    m <- str_match(x_base, "^A([BIK])([0-9]+)$")
+    tibble(sample = x, sample_base = x_base, is_extra = is_extra,
+           inoc_status = "Control", dpi_raw = NA_integer_,
+           genotype_code = m[, 2], replicate = as.integer(m[, 3]))
+  } else if (str_detect(x_base, "^[0-9]+[BIK][0-9]+$")) {
+    m <- str_match(x_base, "^([0-9]+)([BIK])([0-9]+)$")
+    tibble(sample = x, sample_base = x_base, is_extra = is_extra,
+           inoc_status = "Inoculated", dpi_raw = as.integer(m[, 2]),
+           genotype_code = m[, 3], replicate = as.integer(m[, 4]))
+  } else {
+    stop("Sample name does not match expected pattern: ", x)
+  }
+}
+
+sample_info_all <- bind_rows(lapply(sample_names_all, parse_sample_name)) %>%
+  mutate(genotype = recode(genotype_code, "B" = "Broccolini", "I" = "Broccoli", "K" = "GaiLan"))
+
+control_dpi_map <- tribble(~genotype_code, ~control_dpi, "B", 1, "I", 2, "K", 7)
+stage_map <- tribble(
+  ~genotype_code, ~dpi, ~stage,
+  "B", 1,  "Spore_adhesion",
+  "B", 13, "ESP",
+  "B", 22, "MSP",
+  "I", 2,  "Spore_adhesion",
+  "I", 16, "ESP",
+  "I", 25, "MSP",
+  "K", 7,  "Spore_adhesion",
+  "K", 22, "ESP",
+  "K", 28, "MSP"
+)
+
+sample_info_all <- sample_info_all %>%
+  left_join(control_dpi_map, by = "genotype_code") %>%
+  mutate(dpi = if_else(inoc_status == "Control", control_dpi, dpi_raw)) %>%
+  left_join(stage_map, by = c("genotype_code", "dpi")) %>%
+  mutate(stage = if_else(inoc_status == "Control", "Control", stage))
+
+build_counts_matrix <- function(selected_samples, count_list_all) {
+  count_list <- count_list_all[selected_samples]
+  counts_merged <- reduce(count_list, full_join, by = "Name")
+  counts_merged[is.na(counts_merged)] <- 0
+  counts_merged <- counts_merged %>% filter(str_detect(Name, "XP_"))
+  counts_df <- as.data.frame(counts_merged)
+  rownames(counts_df) <- counts_df$Name
+  counts_matrix <- as.matrix(counts_df[, -1, drop = FALSE])
+  mode(counts_matrix) <- "integer"
+  counts_matrix[rowSums(counts_matrix) > 0, , drop = FALSE]
+}
+
+get_selected_samples <- function(sample_info_all, exclude_extra = TRUE, drop_samples = NULL, use_7K_extra_instead = FALSE) {
+  meta <- sample_info_all
+  if (exclude_extra) meta <- meta %>% filter(!is_extra)
+  if (use_7K_extra_instead) {
+    non_7K <- sample_info_all %>% filter(!(genotype_code == "K" & inoc_status == "Inoculated" & dpi == 7))
+    only_7K_extra <- sample_info_all %>% filter(genotype_code == "K", inoc_status == "Inoculated", dpi == 7, is_extra)
+    meta <- bind_rows(non_7K, only_7K_extra)
+  }
+  if (!is.null(drop_samples) && length(drop_samples) > 0) meta <- meta %>% filter(!sample %in% drop_samples)
+  meta %>% arrange(genotype, stage, replicate, sample)
+}
+
+save_deseq_result <- function(dds, contrast_vec, prefix, out_dir, alpha = 0.05, lfc_cutoff = 1) {
+  res <- results(dds, contrast = contrast_vec, alpha = alpha)
+  res_df <- as.data.frame(res) %>% rownames_to_column("gene") %>% arrange(padj)
+  write_csv(res_df, file.path(out_dir, paste0(prefix, ".csv")))
+  sig_df <- res_df %>% filter(!is.na(padj), padj < alpha, abs(log2FoldChange) > lfc_cutoff)
+  up_df <- sig_df %>% filter(log2FoldChange >  lfc_cutoff)
+  down_df <- sig_df %>% filter(log2FoldChange < -lfc_cutoff)
+  write_csv(sig_df,  file.path(out_dir, paste0(prefix, "_sig.csv")))
+  write_csv(up_df,   file.path(out_dir, paste0(prefix, "_up.csv")))
+  write_csv(down_df, file.path(out_dir, paste0(prefix, "_down.csv")))
+  tibble(contrast = prefix, n_total_tested = nrow(res_df), n_sig = nrow(sig_df), n_up = nrow(up_df), n_down = nrow(down_df))
+}
+
+run_deseq_by_genotype <- function(geno_name, sample_info, counts_matrix, out_dir, min_count = 10, min_samples = 2, alpha = 0.05, lfc_cutoff = 1) {
+  geno_dir <- file.path(out_dir, geno_name)
+  dir.create(geno_dir, recursive = TRUE, showWarnings = FALSE)
+
+  meta_g <- sample_info %>% filter(genotype == geno_name) %>% droplevels()
+  counts_g <- counts_matrix[, meta_g$sample, drop = FALSE]
+
+  dds <- DESeqDataSetFromMatrix(countData = counts_g, colData = as.data.frame(meta_g), design = ~ stage)
+  keep <- rowSums(counts(dds) >= min_count) >= min_samples
+  dds <- dds[keep, ]
+  dds$stage <- relevel(dds$stage, ref = "Control")
+  dds <- DESeq(dds)
+
+  write_csv(counts(dds, normalized = TRUE) %>% as.data.frame() %>% rownames_to_column("gene"),
+            file.path(geno_dir, paste0(geno_name, "_normalized_counts.csv")))
+  vsd <- vst(dds, blind = TRUE)
+  write_csv(assay(vsd) %>% as.data.frame() %>% rownames_to_column("gene"),
+            file.path(geno_dir, paste0(geno_name, "_vst_counts.csv")))
+
+  pca_df <- plotPCA(vsd, intgroup = "stage", returnData = TRUE)
+  percentVar <- round(100 * attr(pca_df, "percentVar"))
+  p <- ggplot(pca_df, aes(PC1, PC2, color = stage, label = name)) +
+    geom_point(size = 3) + geom_text(vjust = -0.8, size = 3) +
+    labs(title = paste("PCA -", geno_name),
+         x = paste0("PC1: ", percentVar[1], "% variance"),
+         y = paste0("PC2: ", percentVar[2], "% variance")) +
+    theme_bw(base_size = 12)
+  ggsave(file.path(geno_dir, paste0(geno_name, "_PCA.png")), p, width = 7, height = 5, dpi = 300)
+  write_csv(pca_df, file.path(geno_dir, paste0(geno_name, "_PCA_data.csv")))
+
+  summaries <- list(
+    save_deseq_result(dds, c("stage", "Spore_adhesion", "Control"), paste0(geno_name, "_Spore_adhesion_vs_Control"), geno_dir, alpha, lfc_cutoff),
+    save_deseq_result(dds, c("stage", "ESP", "Control"), paste0(geno_name, "_ESP_vs_Control"), geno_dir, alpha, lfc_cutoff),
+    save_deseq_result(dds, c("stage", "MSP", "Control"), paste0(geno_name, "_MSP_vs_Control"), geno_dir, alpha, lfc_cutoff)
+  )
+  summary_table <- bind_rows(summaries)
+  write_csv(summary_table, file.path(geno_dir, paste0(geno_name, "_contrast_summary.csv")))
+  invisible(list(dds = dds, vsd = vsd, summary = summary_table))
+}
+
+run_scenario <- function(run_name, exclude_extra = FALSE, drop_samples = c("2I5"), use_7K_extra_instead = TRUE) {
+  out_dir <- file.path(base_out, run_name)
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+  sample_info <- get_selected_samples(sample_info_all, exclude_extra, drop_samples, use_7K_extra_instead) %>%
+    filter(!is.na(stage)) %>%
+    mutate(genotype = factor(genotype, levels = c("Broccolini", "Broccoli", "GaiLan")),
+           inoc_status = factor(inoc_status, levels = c("Control", "Inoculated")),
+           stage = factor(stage, levels = c("Control", "Spore_adhesion", "ESP", "MSP")))
+
+  counts_matrix <- build_counts_matrix(sample_info$sample, count_list_all)
+  counts_matrix <- counts_matrix[, sample_info$sample, drop = FALSE]
+
+  write_csv(sample_info, file.path(out_dir, "sample_metadata.csv"))
+  write_csv(as.data.frame(counts_matrix) %>% rownames_to_column("gene"), file.path(out_dir, "counts_matrix_merged.csv"))
+  capture.output(print(table(sample_info$genotype, sample_info$stage)), file = file.path(out_dir, "sample_table.txt"))
+
+  res_broccolini <- run_deseq_by_genotype("Broccolini", sample_info, counts_matrix, out_dir)
+  res_broccoli   <- run_deseq_by_genotype("Broccoli",   sample_info, counts_matrix, out_dir)
+  res_gailan     <- run_deseq_by_genotype("GaiLan",     sample_info, counts_matrix, out_dir)
+
+  all_summaries <- bind_rows(res_broccolini$summary, res_broccoli$summary, res_gailan$summary)
+  write_csv(all_summaries, file.path(out_dir, "all_genotypes_contrast_summary.csv"))
+  invisible(list(sample_info = sample_info, counts_matrix = counts_matrix, summary = all_summaries))
+}
+
+# Final chosen run used in the chapter.
+run_main <- run_scenario(
+  run_name = "chosen_analysis",
+  exclude_extra = FALSE,
+  drop_samples = c("2I5"),
+  use_7K_extra_instead = TRUE
+)

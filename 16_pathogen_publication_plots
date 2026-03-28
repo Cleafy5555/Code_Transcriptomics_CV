@@ -1,0 +1,101 @@
+# ============================================================================
+# Chapter 3 | Publication-style pathogen PCA and heatmap figures
+# ============================================================================
+# Purpose:
+# - Restyle the exploratory pathogen PCA into chapter-quality figures.
+# - Produce both combined and stage-faceted PCA panels with 95% ellipses.
+# - Build the annotated pathogen heatmap used for the figure.
+#
+# Main inputs:
+# - intermediate pathogen outputs from Script 15
+#
+# Main outputs:
+# - final pathogen PCA figures
+# - annotated pathogen heatmap figures
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+out_dir <- file.path("outputs", "intermediate", "pathogen_exploratory", "chosen_analysis_pathogen_exploratory")
+fig_dir <- file.path("outputs", "figures")
+stat_dir <- file.path("outputs", "stats")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(stat_dir, recursive = TRUE, showWarnings = FALSE)
+
+pca_df <- read.csv(file.path(out_dir, "pathogen_PCA_data.csv"), stringsAsFactors = FALSE)
+genotype_cols <- c("Broccolini" = "#2A9134", "Broccoli" = "#F96900", "GaiLan" = "#28AFB0")
+stage_shapes <- c("Control" = 16, "Spore adhesion" = 17, "ESP" = 15, "MSP" = 18)
+
+pca_df$genotype <- factor(pca_df$genotype, levels = c("Broccolini", "Broccoli", "GaiLan"))
+pca_df$stage_plot <- dplyr::recode(as.character(pca_df$stage), "Spore_adhesion" = "Spore adhesion", "ESP" = "ESP", "MSP" = "MSP", "Control" = "Control")
+pca_df$stage_plot <- factor(pca_df$stage_plot, levels = c("Control", "Spore adhesion", "ESP", "MSP"))
+
+p_pca_clean <- ggplot(pca_df, aes(PC1, PC2, colour = genotype, shape = stage_plot)) +
+  stat_ellipse(aes(group = genotype, fill = genotype), type = "t", level = 0.95, geom = "polygon", alpha = 0.12, colour = NA, show.legend = FALSE) +
+  stat_ellipse(aes(group = genotype), type = "t", level = 0.95, linewidth = 0.8, show.legend = FALSE) +
+  geom_point(size = 4) +
+  scale_colour_manual(values = genotype_cols) + scale_fill_manual(values = genotype_cols) + scale_shape_manual(values = stage_shapes, drop = FALSE) +
+  labs(title = "Pathogen PCA", x = "PC1", y = "PC2", colour = "Genotype", shape = "Stage") +
+  theme_classic(base_size = 16)
+
+ggsave(file.path(fig_dir, "16_pathogen_PCA_clean_95ellipse.png"), p_pca_clean, width = 8, height = 6, dpi = 600, bg = "white")
+
+# Annotated heatmap using the precomputed top-per-cluster matrix.
+heat_mat_z <- read.csv(file.path(out_dir, "pathogen_top_variable_genes_zscore.csv"), stringsAsFactors = FALSE, check.names = FALSE) %>% column_to_rownames("gene") %>% as.matrix()
+top_per_cluster <- read.csv(file.path(out_dir, "pathogen_top15_genes_per_cluster.csv"), stringsAsFactors = FALSE)
+
+gene_annot <- tibble::tribble(
+  ~gene,         ~label,
+  "PBTT_00046",  "ubiquitin-like domain protein",
+  "PBTT_00092",  "calmodulin",
+  "PBTT_00198",  "actin",
+  "PBTT_00242",  "polyubiquitin 3 isoform B",
+  "PBTT_00859",  "macro domain-containing protein",
+  "PBTT_00895",  "beta-tubulin",
+  "PBTT_00896",  "beta-tubulin",
+  "PBTT_01733",  "actin",
+  "PBTT_02308",  "histone H3",
+  "PBTT_03140",  "heat shock protein",
+  "PBTT_03177",  "heat shock 70 kDa protein",
+  "PBTT_03528",  "late histone H2B.L4-like",
+  "PBTT_04175",  "actin",
+  "PBTT_04178",  "ubiquitin-60S ribosomal protein",
+  "PBTT_04514",  "RNA helicase",
+  "PBTT_05974",  "ATP synthase subunit beta",
+  "PBTT_07198",  "Histone H2A",
+  "PBTT_08257",  "actin",
+  "PBTT_08425",  "actin",
+  "PBTT_08450",  "histone H3",
+  "PBTT_08451",  "histone H4",
+  "PBTT_09252",  "tubulin alpha chain"
+)
+
+gene_annot <- gene_annot %>% group_by(label) %>% mutate(label = ifelse(n() > 1, paste0(label, " [", gene, "]"), label)) %>% ungroup()
+label_map <- setNames(gene_annot$label, gene_annot$gene)
+small_genes <- unique(top_per_cluster$gene)
+small_mat <- heat_mat_z[rownames(heat_mat_z) %in% small_genes, , drop = FALSE]
+gene_order <- top_per_cluster$gene[top_per_cluster$gene %in% rownames(small_mat)]
+small_mat <- small_mat[gene_order, , drop = FALSE]
+new_row_names <- label_map[rownames(small_mat)]; new_row_names[is.na(new_row_names)] <- rownames(small_mat)[is.na(new_row_names)]; rownames(small_mat) <- new_row_names
+col_map <- c("Broccolini_Spore_adhesion" = "Broccolini|Spore", "Broccoli_Spore_adhesion" = "Broccoli|Spore", "GaiLan_Spore_adhesion" = "Gai-lan|Spore", "Broccolini_ESP" = "Broccolini|ESP", "Broccoli_ESP" = "Broccoli|ESP", "GaiLan_ESP" = "Gai-lan|ESP", "Broccolini_MSP" = "Broccolini|MSP", "Broccoli_MSP" = "Broccoli|MSP", "GaiLan_MSP" = "Gai-lan|MSP")
+colnames(small_mat) <- col_map[colnames(small_mat)]
+desired_cols <- c("Broccolini|Spore", "Broccoli|Spore", "Gai-lan|Spore", "Broccolini|ESP", "Broccoli|ESP", "Gai-lan|ESP", "Broccolini|MSP", "Broccoli|MSP", "Gai-lan|MSP")
+small_mat <- small_mat[, desired_cols, drop = FALSE]
+col_fun <- circlize::colorRamp2(c(-2, 0, 2), c("#2B6CB0", "white", "#D73027"))
+ht <- Heatmap(small_mat, name = "z-score", col = col_fun, cluster_rows = TRUE, cluster_columns = FALSE, show_row_names = TRUE, row_names_side = "right", row_names_gp = gpar(fontsize = 9), show_column_names = TRUE)
+png(file.path(fig_dir, "16_pathogen_top15_per_cluster_heatmap_annotated.png"), width = 3600, height = 2600, res = 300); draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right"); dev.off()

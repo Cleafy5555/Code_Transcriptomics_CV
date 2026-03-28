@@ -1,0 +1,78 @@
+# ============================================================================
+# Chapter 3 | Build shared and genotype-specific DEG membership tables
+# ============================================================================
+# Purpose:
+# - Read significant DEG lists for each genotype and stage-vs-control contrast.
+# - Build membership tables describing whether each gene is present in Broccolini, Broccoli, and/or Gai-lan.
+# - Export full membership matrices and per-class gene lists for overlap analyses.
+#
+# Main inputs:
+# - Significant DEG tables from Script 01.
+#
+# Main outputs:
+# - overlap membership tables for all, upregulated, and downregulated sets.
+# - class-specific gene lists used later for UpSet plots and supplementary tables.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(purrr)
+  library(stringr)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+out_dir  <- file.path("outputs", "intermediate", "overlap_stage_vs_control")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+genotypes <- c("Broccolini", "Broccoli", "GaiLan")
+contrasts <- c("Spore_adhesion_vs_Control", "ESP_vs_Control", "MSP_vs_Control")
+
+read_sig_deg <- function(genotype, contrast, direction = c("all", "up", "down")) {
+  direction <- match.arg(direction)
+  suffix <- switch(direction, all = "_sig.csv", up = "_up.csv", down = "_down.csv")
+  f <- file.path(base_dir, genotype, paste0(genotype, "_", contrast, suffix))
+  stopifnot(file.exists(f))
+  read_csv(f, show_col_types = FALSE) %>% mutate(genotype = genotype, contrast = contrast) %>% select(gene, genotype, contrast)
+}
+
+build_membership_table <- function(contrast, direction = c("all", "up", "down")) {
+  direction <- match.arg(direction)
+  lst <- lapply(genotypes, function(g) {
+    read_sig_deg(g, contrast, direction) %>% distinct(gene) %>% mutate(present = 1L) %>% rename(!!g := present)
+  })
+  reduce(lst, full_join, by = "gene") %>%
+    mutate(across(all_of(genotypes), ~replace_na(., 0L)),
+           n_hosts = Broccolini + Broccoli + GaiLan,
+           class = case_when(
+             n_hosts == 3 ~ "shared_all_three",
+             Broccolini == 1 & Broccoli == 1 & GaiLan == 0 ~ "shared_broccolini_broccoli",
+             Broccolini == 1 & Broccoli == 0 & GaiLan == 1 ~ "shared_broccolini_gailan",
+             Broccolini == 0 & Broccoli == 1 & GaiLan == 1 ~ "shared_broccoli_gailan",
+             Broccolini == 1 & Broccoli == 0 & GaiLan == 0 ~ "unique_broccolini",
+             Broccolini == 0 & Broccoli == 1 & GaiLan == 0 ~ "unique_broccoli",
+             Broccolini == 0 & Broccoli == 0 & GaiLan == 1 ~ "unique_gailan",
+             TRUE ~ "other"
+           ),
+           contrast = contrast, direction = direction) %>%
+    arrange(desc(n_hosts), class, gene)
+}
+
+membership_all  <- map_dfr(contrasts, build_membership_table, direction = "all")
+membership_up   <- map_dfr(contrasts, build_membership_table, direction = "up")
+membership_down <- map_dfr(contrasts, build_membership_table, direction = "down")
+
+write_csv(membership_all,  file.path(out_dir, "DEG_membership_all_stage_vs_control.csv"))
+write_csv(membership_up,   file.path(out_dir, "DEG_membership_up_stage_vs_control.csv"))
+write_csv(membership_down, file.path(out_dir, "DEG_membership_down_stage_vs_control.csv"))
+
+write_csv(membership_all  %>% count(contrast, class, name = "n_genes"), file.path(out_dir, "DEG_overlap_summary_all.csv"))
+write_csv(membership_up   %>% count(contrast, class, name = "n_genes"), file.path(out_dir, "DEG_overlap_summary_up.csv"))
+write_csv(membership_down %>% count(contrast, class, name = "n_genes"), file.path(out_dir, "DEG_overlap_summary_down.csv"))

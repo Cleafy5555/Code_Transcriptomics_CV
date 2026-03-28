@@ -1,0 +1,82 @@
+# ============================================================================
+# Chapter 3 | Extend GO mapping with Ensembl-derived annotation downloads
+# ============================================================================
+# Purpose:
+# - Read additional Ensembl batch-download annotation files.
+# - Merge those annotations into the existing XP/LOC/GO conversion framework.
+# - Update the master GO mapping table and regenerate DEG annotation tables.
+#
+# Main inputs:
+# - master mapping tables from Script 08
+# - Ensembl batch download TSV files
+#
+# Main outputs:
+# - updated GO master table
+# - updated DEG conversion/annotation tables
+# - merge summary files
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(tibble)
+  library(purrr)
+})
+
+base_dir <- file.path("outputs", "intermediate", "go_mapping")
+downloads_dir <- file.path("data", "raw", "Ensembl_XPbase_batches_no_GO", "downloads")
+out_dir <- file.path(base_dir, "merged_outputs")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+lookup_tbl <- read_csv(file.path(base_dir, "XP_to_LOC_conversion_table.csv"), show_col_types = FALSE) %>% mutate(across(everything(), as.character))
+master_tbl <- read_csv(file.path(base_dir, "XP_LOC_GO_master_conversion_table.csv"), show_col_types = FALSE) %>% mutate(across(everything(), as.character))
+
+tsv_files <- list.files(downloads_dir, pattern = "\\.tsv$", full.names = TRUE)
+if (length(tsv_files) == 0) stop("No TSV files found in: ", downloads_dir)
+
+ensembl_raw <- purrr::map_dfr(tsv_files, ~ read_tsv(.x, show_col_types = FALSE, progress = FALSE) %>% mutate(source_file = basename(.x)))
+ensembl_tbl <- ensembl_raw %>%
+  rename(ensembl_gene_id = `Gene stable ID`,
+         ensembl_transcript_id = `Transcript stable ID`,
+         gene_description = `Gene description`,
+         gene_name = `Gene name`,
+         GO_ID = `GO term accession`,
+         GO_term_name = `GO term name`,
+         GO_definition = `GO term definition`,
+         Evidence = `GO term evidence code`,
+         GO_domain = `GO domain`,
+         ensembl_geneid = `NCBI gene (formerly Entrezgene) ID`,
+         xp_base = `RefSeq peptide predicted ID`) %>%
+  mutate(across(everything(), as.character)) %>%
+  filter(!is.na(xp_base), xp_base != "") %>%
+  mutate(Aspect = case_when(GO_domain == "biological_process" ~ "BP",
+                            GO_domain == "molecular_function" ~ "MF",
+                            GO_domain == "cellular_component" ~ "CC",
+                            TRUE ~ GO_domain),
+         db = "EnsemblPlants") %>%
+  distinct(xp_base, GO_ID, Evidence, Aspect, ensembl_gene_id, ensembl_transcript_id, gene_name, gene_description, ensembl_geneid, .keep_all = TRUE)
+
+ensembl_joined <- lookup_tbl %>% left_join(ensembl_tbl, by = "xp_base")
+write_csv(ensembl_joined, file.path(out_dir, "XP_lookup_table_unique_joined_with_ensembl.csv"))
+
+new_go_rows <- ensembl_joined %>%
+  filter(!is.na(GO_ID), GO_ID != "") %>%
+  transmute(xp_id = xp_id, xp_base = xp_base, loc_id = loc_id,
+            protein_description = coalesce(protein_description.x, gene_description),
+            db = db, geneid = coalesce(geneid, ensembl_geneid), GO_ID = GO_ID, Evidence = Evidence, Aspect = Aspect) %>%
+  distinct()
+
+master_keyed <- master_tbl %>% distinct(xp_base, GO_ID, Evidence, Aspect, .keep_all = TRUE)
+new_go_only <- new_go_rows %>% anti_join(master_keyed %>% select(xp_base, GO_ID, Evidence, Aspect), by = c("xp_base", "GO_ID", "Evidence", "Aspect"))
+updated_master <- bind_rows(master_tbl, new_go_only) %>% distinct()
+
+write_csv(updated_master, file.path(out_dir, "XP_LOC_GO_master_conversion_table_UPDATED.csv"))
+write_csv(new_go_only, file.path(out_dir, "NEW_GO_ROWS_from_Ensembl_downloads.csv"))

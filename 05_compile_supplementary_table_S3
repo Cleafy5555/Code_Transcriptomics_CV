@@ -1,0 +1,66 @@
+# ============================================================================
+# Chapter 3 | Compile Supplementary Table S3 host DESeq2 results
+# ============================================================================
+# Purpose:
+# - Combine all full host DESeq2 result tables into one long supplementary table.
+# - Add genotype, contrast, and regulation metadata.
+# - Export a single CSV suitable for supplementary materials.
+#
+# Main inputs:
+# - Full DESeq2 result files from Script 01 for each genotype and contrast.
+#
+# Main outputs:
+# - Supplementary Table S3 as a combined CSV.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tibble)
+  library(purrr)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+out_file <- file.path("outputs", "tables", "05_Supplementary_Table_S3_complete_host_DESeq2_results.csv")
+dir.create(dirname(out_file), recursive = TRUE, showWarnings = FALSE)
+
+genotypes <- c("Broccolini", "Broccoli", "GaiLan")
+contrasts <- c("Spore_adhesion_vs_Control", "ESP_vs_Control", "MSP_vs_Control")
+
+full_deg_files <- expand.grid(genotype = genotypes, contrast = contrasts, stringsAsFactors = FALSE) %>%
+  mutate(file = file.path(base_dir, genotype, paste0(genotype, "_", contrast, ".csv")))
+stopifnot(all(file.exists(full_deg_files$file)))
+
+read_deg_with_meta <- function(f) {
+  fname <- basename(f) %>% str_remove("\\.csv$")
+  genotype <- case_when(
+    str_starts(fname, "Broccolini_") ~ "Broccolini",
+    str_starts(fname, "Broccoli_")   ~ "Broccoli",
+    str_starts(fname, "GaiLan_")     ~ "GaiLan",
+    TRUE ~ NA_character_
+  )
+  contrast <- fname %>% str_remove("^Broccolini_") %>% str_remove("^Broccoli_") %>% str_remove("^GaiLan_")
+  read_csv(f, show_col_types = FALSE) %>%
+    mutate(genotype = genotype, contrast = contrast, comparison_type = "within_genotype",
+           regulation = case_when(is.na(log2FoldChange) ~ NA_character_,
+                                  log2FoldChange > 0 ~ "up",
+                                  log2FoldChange < 0 ~ "down",
+                                  log2FoldChange == 0 ~ "no_change")) %>%
+    select(genotype, contrast, comparison_type, regulation, gene, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj)
+}
+
+s3_tbl <- map_dfr(full_deg_files$file, read_deg_with_meta) %>%
+  mutate(genotype = factor(genotype, levels = c("Broccolini", "Broccoli", "GaiLan")),
+         contrast = factor(contrast, levels = contrasts)) %>%
+  arrange(genotype, contrast, padj, desc(abs(log2FoldChange))) %>%
+  mutate(genotype = as.character(genotype), contrast = as.character(contrast))
+
+write_csv(s3_tbl, out_file)

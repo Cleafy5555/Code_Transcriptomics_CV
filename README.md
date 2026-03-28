@@ -1,6 +1,6 @@
 # Transcriptomics analysis
 
-This repository contains cleaned and annotated R scripts for the paper "COMPARATIVE TRANSCRIPTOMICS OF EARLY CLUBROOT INFECTION REVEALS DISTINCT HOST REPROGRAMMING IN BROCCOLI, BROCCOLINI AND GAI-LAN".
+This repository contains cleaned and annotated R scripts for the paper "COMPARATIVE TRANSCRIPTOMICS OF EARLY CLUBROOT INFECTION REVEALS DISTINCT HOST REPROGRAMMING IN BROCCOLI, BROCCOLINI AND GAI-LAN" and Chapter 3 of my thesis.
 
 This repository contains cleaned code only. Raw sequencing/count files and large external annotation resources are not included.
 

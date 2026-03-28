@@ -1,0 +1,101 @@
+# ============================================================================
+# Chapter 3 | Custom UpSet-style overlap plots
+# ============================================================================
+# Purpose:
+# - Convert the overlap membership tables into custom UpSet-style plots.
+# - Generate separate figure sets for upregulated and downregulated shared/unique DEG patterns.
+#
+# Main inputs:
+# - overlap membership tables from Script 06.
+#
+# Main outputs:
+# - publication-style PNG/PDF UpSet panels and combined figure layouts.
+#
+# Notes:
+# - The intersection order is fixed manually to keep the same visual logic across stages.
+# - This script is specific to the chapter figure design and styling.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(stringr)
+})
+
+overlap_dir <- file.path("outputs", "intermediate", "overlap_stage_vs_control")
+fig_dir <- file.path("outputs", "figures")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+stage_cols <- c("Control" = "grey", "Spore adhesion" = "#FBACBE", "ESP" = "#B9D2B1", "MSP" = "#A18276")
+intersection_order <- c("Broccolini", "Broccoli", "GaiLan", "Broccolini&Broccoli", "Broccolini&GaiLan", "Broccoli&GaiLan", "Broccolini&Broccoli&GaiLan")
+intersection_labels <- c("Broccolini" = "Bcl", "Broccoli" = "Bco", "GaiLan" = "Gal", "Broccolini&Broccoli" = "Bcl+Bco", "Broccolini&GaiLan" = "Bcl+Gal", "Broccoli&GaiLan" = "Bco+Gal", "Broccolini&Broccoli&GaiLan" = "Bcl+Bco+Gal")
+pretty_titles <- c("Spore_adhesion_vs_Control" = "Spore adhesion vs control", "ESP_vs_Control" = "ESP vs control", "MSP_vs_Control" = "MSP vs control")
+contrast_to_stage <- c("Spore_adhesion_vs_Control" = "Spore adhesion", "ESP_vs_Control" = "ESP", "MSP_vs_Control" = "MSP")
+
+assign_intersection <- function(bcl, bco, gal) {
+  case_when(
+    bcl == 1 & bco == 0 & gal == 0 ~ "Broccolini",
+    bcl == 0 & bco == 1 & gal == 0 ~ "Broccoli",
+    bcl == 0 & bco == 0 & gal == 1 ~ "GaiLan",
+    bcl == 1 & bco == 1 & gal == 0 ~ "Broccolini&Broccoli",
+    bcl == 1 & bco == 0 & gal == 1 ~ "Broccolini&GaiLan",
+    bcl == 0 & bco == 1 & gal == 1 ~ "Broccoli&GaiLan",
+    bcl == 1 & bco == 1 & gal == 1 ~ "Broccolini&Broccoli&GaiLan",
+    TRUE ~ NA_character_
+  )
+}
+
+plot_upset_custom <- function(df, contrast_code) {
+  df_sub <- df %>% filter(contrast == contrast_code) %>% mutate(intersection = assign_intersection(Broccolini, Broccoli, GaiLan)) %>% filter(!is.na(intersection))
+  stage_name <- contrast_to_stage[[contrast_code]]
+  stage_fill <- stage_cols[[stage_name]]
+
+  bars_df <- df_sub %>% count(intersection, name = "n") %>% complete(intersection = intersection_order, fill = list(n = 0)) %>% mutate(intersection = factor(intersection, levels = intersection_order))
+  matrix_df <- tibble(intersection = intersection_order) %>%
+    mutate(Broccolini = str_detect(intersection, "Broccolini"),
+           Broccoli   = str_detect(intersection, "Broccoli"),
+           GaiLan     = str_detect(intersection, "GaiLan")) %>%
+    pivot_longer(cols = c(Broccolini, Broccoli, GaiLan), names_to = "host", values_to = "present") %>%
+    mutate(intersection = factor(intersection, levels = intersection_order), host = factor(host, levels = c("Broccolini", "Broccoli", "GaiLan")))
+  line_df <- matrix_df %>% filter(present) %>% group_by(intersection) %>% summarise(y_min = min(as.numeric(host)), y_max = max(as.numeric(host)), .groups = "drop") %>% mutate(intersection = factor(intersection, levels = intersection_order))
+
+  p_top <- ggplot(bars_df, aes(x = intersection, y = n)) +
+    geom_col(width = 0.9, fill = stage_fill) +
+    geom_text(aes(label = ifelse(n > 0, n, "")), vjust = -0.35, size = 5) +
+    scale_x_discrete(labels = intersection_labels, drop = FALSE) +
+    labs(y = "Shared DEG count", x = NULL, title = pretty_titles[[contrast_code]]) +
+    coord_cartesian(clip = "off") + theme_minimal(base_size = 14)
+
+  p_matrix <- ggplot(matrix_df, aes(x = intersection, y = host)) +
+    geom_rect(data = tibble(ymin = 1.5, ymax = 2.5, xmin = -Inf, xmax = Inf),
+              aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), inherit.aes = FALSE, fill = "grey92") +
+    geom_segment(data = line_df, aes(x = intersection, xend = intersection, y = y_min, yend = y_max), inherit.aes = FALSE, linewidth = 0.8, colour = "black") +
+    geom_point(aes(fill = present), shape = 21, size = 5, stroke = 1) +
+    scale_fill_manual(values = c("TRUE" = stage_fill, "FALSE" = "white")) +
+    scale_x_discrete(labels = intersection_labels, drop = FALSE) +
+    scale_y_discrete(limits = rev(c("Broccolini", "Broccoli", "GaiLan"))) +
+    labs(x = NULL, y = NULL) + theme_minimal(base_size = 14) + theme(legend.position = "none")
+
+  wrap_plots(p_top, p_matrix, ncol = 1, heights = c(3.2, 1.2))
+}
+
+plot_direction_set <- function(in_file, file_stub) {
+  deg_membership <- read_csv(in_file, show_col_types = FALSE) %>% mutate(Broccolini = as.integer(Broccolini), Broccoli = as.integer(Broccoli), GaiLan = as.integer(GaiLan), contrast = as.character(contrast))
+  p_spore <- plot_upset_custom(deg_membership, "Spore_adhesion_vs_Control")
+  p_esp   <- plot_upset_custom(deg_membership, "ESP_vs_Control")
+  p_msp   <- plot_upset_custom(deg_membership, "MSP_vs_Control")
+  p_combined <- wrap_plots(p_spore, p_esp, p_msp, ncol = 1) + plot_annotation(tag_levels = "A")
+  ggsave(file.path(fig_dir, paste0("07_figure4_upset_combined_", file_stub, ".png")), p_combined, width = 8.8, height = 16.5, dpi = 600, bg = "white")
+  ggsave(file.path(fig_dir, paste0("07_figure4_upset_combined_", file_stub, ".pdf")), p_combined, width = 8.8, height = 16.5, bg = "white")
+}
+
+plot_direction_set(file.path(overlap_dir, "DEG_membership_up_stage_vs_control.csv"), "UP")
+plot_direction_set(file.path(overlap_dir, "DEG_membership_down_stage_vs_control.csv"), "DOWN")

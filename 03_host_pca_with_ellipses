@@ -1,0 +1,130 @@
+# ============================================================================
+# Chapter 3 | Host PCA plots with 95% ellipses
+# ============================================================================
+# Purpose:
+# - Add 95% confidence ellipses to the host PCA plots.
+# - Generate both genotype-specific stage ellipses and combined genotype ellipses.
+# - Save publication-ready PNG/PDF outputs and the PCA coordinates used.
+#
+# Main inputs:
+# - The same VST matrices and metadata produced by Script 01.
+#
+# Main outputs:
+# - PCA plots with ellipses for chapter figure development.
+#
+# Notes:
+# - Ellipses are only drawn for groups with enough samples and variance.
+# - This is a figure-refinement script, not a new DESeq2 analysis.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(ggplot2)
+  library(tibble)
+  library(DESeq2)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+fig_dir  <- file.path("outputs", "figures")
+stat_dir <- file.path("outputs", "stats")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(stat_dir, recursive = TRUE, showWarnings = FALSE)
+
+meta <- read_csv(file.path(base_dir, "sample_metadata.csv"), show_col_types = FALSE) %>%
+  mutate(genotype = factor(genotype, levels = c("Broccolini", "Broccoli", "GaiLan")),
+         stage = factor(stage, levels = c("Control", "Spore_adhesion", "ESP", "MSP")))
+counts_file <- file.path(base_dir, "counts_matrix_merged.csv")
+genotypes <- c("Broccolini", "Broccoli", "GaiLan")
+
+stage_cols <- c("Control" = "grey", "Spore adhesion" = "#FBACBE", "ESP" = "#B9D2B1", "MSP" = "#A18276")
+stage_shapes <- c("Control" = 16, "Spore adhesion" = 17, "ESP" = 15, "MSP" = 18)
+genotype_cols_plot <- c("Broccolini" = "#2A9134", "Broccoli" = "#F96900", "Gai-lan" = "#28AFB0")
+
+can_draw_ellipse <- function(df, group_col) {
+  grp <- rlang::ensym(group_col)
+  df %>% group_by(!!grp) %>%
+    summarise(n = n(), n_pc1 = n_distinct(PC1), n_pc2 = n_distinct(PC2), .groups = "drop") %>%
+    filter(n >= 3, n_pc1 >= 2, n_pc2 >= 2) %>% pull(!!grp)
+}
+
+make_pca_plot_ellipses <- function(geno_name) {
+  vst_file <- file.path(base_dir, geno_name, paste0(geno_name, "_vst_counts.csv"))
+  vst_df <- read_csv(vst_file, show_col_types = FALSE)
+  meta_g <- meta %>% filter(genotype == geno_name)
+  vst_mat <- vst_df %>% column_to_rownames("gene") %>% as.matrix()
+  common_samples <- intersect(meta_g$sample, colnames(vst_mat))
+  meta_g <- meta_g %>% filter(sample %in% common_samples)
+  vst_mat <- vst_mat[, meta_g$sample, drop = FALSE]
+  pca <- prcomp(t(vst_mat), center = TRUE, scale. = FALSE)
+  percentVar <- (pca$sdev^2 / sum(pca$sdev^2)) * 100
+  pca_df_g <- as.data.frame(pca$x[, 1:2]) %>%
+    rownames_to_column("sample") %>%
+    left_join(meta_g, by = "sample") %>%
+    mutate(stage = factor(stage,
+                          levels = c("Control", "Spore_adhesion", "ESP", "MSP"),
+                          labels = c("Control", "Spore adhesion", "ESP", "MSP")))
+  ellipse_groups <- can_draw_ellipse(pca_df_g, stage)
+  p <- ggplot(pca_df_g, aes(x = PC1, y = PC2, color = stage)) +
+    stat_ellipse(data = pca_df_g %>% filter(stage %in% ellipse_groups),
+                 aes(group = stage, color = stage), type = "t", level = 0.95,
+                 linewidth = 0.8, show.legend = FALSE) +
+    geom_point(size = 4) +
+    labs(title = paste("PCA -", geno_name),
+         x = paste0("PC1: ", round(percentVar[1]), "% variance"),
+         y = paste0("PC2: ", round(percentVar[2]), "% variance"),
+         color = "Stage") +
+    scale_color_manual(values = stage_cols) +
+    theme_classic(base_size = 18)
+  ggsave(file.path(fig_dir, paste0("03_", geno_name, "_PCA_ellipses.png")), p, width = 7, height = 5, dpi = 600)
+  ggsave(file.path(fig_dir, paste0("03_", geno_name, "_PCA_ellipses.pdf")), p, width = 7, height = 5)
+  write_csv(pca_df_g, file.path(stat_dir, paste0("03_", geno_name, "_PCA_ellipses_data.csv")))
+  p
+}
+
+plots_ellipses <- lapply(genotypes, make_pca_plot_ellipses)
+
+counts_df <- read_csv(counts_file, show_col_types = FALSE)
+counts_mat <- counts_df %>% distinct(gene, .keep_all = TRUE) %>% column_to_rownames("gene") %>% as.matrix()
+mode(counts_mat) <- "integer"
+counts_mat <- counts_mat[, meta$sample, drop = FALSE]
+
+dds_all <- DESeqDataSetFromMatrix(countData = counts_mat, colData = as.data.frame(meta), design = ~ genotype + stage)
+keep <- rowSums(counts(dds_all) >= 10) >= 3
+dds_all <- dds_all[keep, ]
+vsd_all <- vst(dds_all, blind = TRUE)
+
+pca_all <- prcomp(t(assay(vsd_all)), center = TRUE, scale. = FALSE)
+percentVar_all <- (pca_all$sdev^2 / sum(pca_all$sdev^2)) * 100
+pca_df_all <- as.data.frame(pca_all$x[, 1:2]) %>%
+  rownames_to_column("sample") %>%
+  left_join(meta, by = "sample") %>%
+  mutate(stage = recode(as.character(stage), "Control" = "Control", "Spore_adhesion" = "Spore adhesion", "ESP" = "ESP", "MSP" = "MSP"),
+         stage = factor(stage, levels = c("Control", "Spore adhesion", "ESP", "MSP")),
+         genotype_plot = recode(as.character(genotype), "Broccolini" = "Broccolini", "Broccoli" = "Broccoli", "GaiLan" = "Gai-lan"),
+         genotype_plot = factor(genotype_plot, levels = c("Broccolini", "Broccoli", "Gai-lan")))
+
+ellipse_genotypes <- can_draw_ellipse(pca_df_all, genotype_plot)
+
+p_combined_ellipses <- ggplot(pca_df_all, aes(x = PC1, y = PC2, color = genotype_plot, shape = stage)) +
+  stat_ellipse(data = pca_df_all %>% filter(genotype_plot %in% ellipse_genotypes),
+               aes(group = genotype_plot, color = genotype_plot),
+               type = "t", level = 0.95, linewidth = 0.8, show.legend = FALSE) +
+  geom_point(size = 4, stroke = 1) +
+  labs(title = "PCA - all genotypes",
+       x = paste0("PC1: ", round(percentVar_all[1]), "% variance"),
+       y = paste0("PC2: ", round(percentVar_all[2]), "% variance"),
+       color = "Genotype", shape = "Stage") +
+  scale_color_manual(values = genotype_cols_plot, drop = FALSE) +
+  scale_shape_manual(values = stage_shapes, drop = FALSE) +
+  theme_classic(base_size = 18)
+
+ggsave(file.path(fig_dir, "03_PCA_all_genotypes_ellipses.png"), p_combined_ellipses, width = 8, height = 6, dpi = 600)
+ggsave(file.path(fig_dir, "03_PCA_all_genotypes_ellipses.pdf"), p_combined_ellipses, width = 8, height = 6)
+write_csv(pca_df_all, file.path(stat_dir, "03_PCA_all_genotypes_ellipses_data.csv"))

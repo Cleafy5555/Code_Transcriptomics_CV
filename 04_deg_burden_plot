@@ -1,0 +1,77 @@
+# ============================================================================
+# Chapter 3 | DEG burden plot across stages and genotypes
+# ============================================================================
+# Purpose:
+# - Summarise the number of up- and downregulated DEGs for each genotype at each stage versus control.
+# - Convert the DESeq2 contrast summary into a mirrored bar plot for the chapter figure.
+#
+# Main inputs:
+# - outputs/intermediate/host_deseq_within_genotype/chosen_analysis/all_genotypes_contrast_summary.csv
+#
+# Main outputs:
+# - Figure-style DEG burden plot and its underlying plotting table.
+#
+# Notes:
+# - Upregulated and downregulated DEG counts are plotted as positive and negative bars.
+# - This script is downstream of Script 01 and relies on its summary file.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(tidyr)
+  library(scales)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+fig_dir  <- file.path("outputs", "figures")
+stat_dir <- file.path("outputs", "stats")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(stat_dir, recursive = TRUE, showWarnings = FALSE)
+
+summary_file <- file.path(base_dir, "all_genotypes_contrast_summary.csv")
+stopifnot(file.exists(summary_file))
+
+deg_summary <- read_csv(summary_file, show_col_types = FALSE) %>%
+  mutate(
+    genotype = str_extract(contrast, "^[^_]+"),
+    contrast_short = str_remove(contrast, "^[^_]+_"),
+    stage = factor(contrast_short,
+                   levels = c("Spore_adhesion_vs_Control", "ESP_vs_Control", "MSP_vs_Control"),
+                   labels = c("Spore adhesion", "ESP", "MSP")),
+    genotype = factor(genotype,
+                      levels = c("Broccolini", "Broccoli", "GaiLan"),
+                      labels = c("Broccolini", "Broccoli", "Gai-lan"))
+  ) %>%
+  select(genotype, stage, n_up, n_down) %>%
+  pivot_longer(cols = c(n_up, n_down), names_to = "direction", values_to = "n_deg") %>%
+  mutate(direction = recode(direction, n_up = "Up", n_down = "Down"),
+         n_deg_signed = if_else(direction == "Down", -n_deg, n_deg))
+
+label_df <- deg_summary %>%
+  mutate(label_y = if_else(direction == "Up", n_deg_signed + 260, n_deg_signed - 260))
+
+ymax <- max(abs(label_df$label_y), na.rm = TRUE)
+ymax <- ceiling(ymax / 500) * 500
+
+p <- ggplot(deg_summary, aes(x = stage, y = n_deg_signed, fill = direction)) +
+  geom_col(width = 0.62) +
+  geom_hline(yintercept = 0, linewidth = 0.4, colour = "grey40") +
+  geom_text(data = label_df, aes(x = stage, y = label_y, label = comma(abs(n_deg_signed))), size = 3.5, inherit.aes = FALSE) +
+  facet_wrap(~ genotype, nrow = 1) +
+  scale_y_continuous(limits = c(-ymax, ymax), labels = abs, expand = expansion(mult = c(0.04, 0.08))) +
+  scale_fill_manual(values = c("Up" = "#B22222", "Down" = "#3C5AA6")) +
+  labs(x = "Infection stage", y = "Number of DEGs", fill = "Direction") +
+  theme_classic(base_size = 12)
+
+ggsave(file.path(fig_dir, "04_figure3_DEG_burden_stage_vs_control.png"), p, width = 7.6, height = 4.6, dpi = 600)
+write_csv(deg_summary, file.path(stat_dir, "04_figure3_DEG_burden_stage_vs_control_data.csv"))

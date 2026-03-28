@@ -1,0 +1,58 @@
+# ============================================================================
+# Chapter 3 | Build XP-to-GO mapping tables from reference files
+# ============================================================================
+# Purpose:
+# - Parse the Brassica protein FASTA headers to recover XP and LOC identifiers.
+# - Read the GO annotation GAF file.
+# - Create a reusable XP/LOC/GO mapping table for downstream annotation and enrichment.
+#
+# Main inputs:
+# - data/raw/reference/GCF_000695525.1_BOL_protein.faa.gz
+# - data/raw/reference/GCF_000695525.1_BOL_gene_ontology.gaf
+#
+# Main outputs:
+# - master XP-to-GO conversion tables used by the later GO scripts.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tibble)
+})
+
+rna_dir  <- file.path("data", "raw")
+out_dir  <- file.path("outputs", "intermediate", "go_mapping")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+faa_file <- file.path(rna_dir, "GCF_000695525.1_BOL_protein.faa.gz")
+gaf_file <- file.path(rna_dir, "GCF_000695525.1_BOL_gene_ontology.gaf")
+
+faa_lines <- read_lines(faa_file)
+faa_headers <- tibble(header = faa_lines) %>% filter(str_starts(header, ">"))
+
+xp_to_loc <- faa_headers %>%
+  transmute(header,
+            xp_id   = str_extract(header, "XP_[0-9]+\\.[0-9]+"),
+            xp_base = str_extract(header, "XP_[0-9]+"),
+            loc_id  = str_extract(header, "LOC[0-9]+"),
+            protein_description = str_remove(header, "^>XP_[0-9]+\\.[0-9]+\\s+")) %>%
+  filter(!is.na(xp_base)) %>% distinct(xp_base, .keep_all = TRUE)
+
+gaf <- read_tsv(gaf_file, comment = "!", col_names = FALSE, show_col_types = FALSE, progress = FALSE)
+names(gaf) <- paste0("V", seq_len(ncol(gaf)))
+
+loc_to_go <- gaf %>%
+  transmute(db = V1, geneid = as.character(V2), loc_id = V3, GO_ID = V5, Evidence = V7, Aspect = V9) %>%
+  filter(!is.na(loc_id), !is.na(GO_ID)) %>% distinct()
+
+xp_loc_go_master <- xp_to_loc %>% left_join(loc_to_go, by = "loc_id", relationship = "many-to-many") %>% distinct()
+write_csv(xp_loc_go_master, file.path(out_dir, "XP_LOC_GO_master_conversion_table.csv"))
+write_csv(xp_to_loc %>% select(xp_id, xp_base, loc_id, protein_description), file.path(out_dir, "XP_to_LOC_conversion_table.csv"))

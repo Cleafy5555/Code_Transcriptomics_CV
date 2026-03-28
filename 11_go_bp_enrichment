@@ -1,0 +1,74 @@
+# ============================================================================
+# Chapter 3 | GO biological-process enrichment from mapped DEGs
+# ============================================================================
+# Purpose:
+# - Perform BP-focused GO enrichment on retained genotype/stage DEG sets.
+# - Save raw and filtered enrichment tables.
+# - Produce the chapter-style GO BP dotplot.
+#
+# Main inputs:
+# - updated annotation and conversion tables
+# - DEG tables from the host DESeq2 workflow
+#
+# Main outputs:
+# - GO BP enrichment result tables
+# - Figure 5-style GO BP dotplot
+#
+# Notes:
+# - This is a custom hypergeometric-style workflow built from the mapped GO universe.
+# - Only contrasts with sufficiently large DEG sets are retained for plotting.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(purrr)
+  library(clusterProfiler)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+map_dir  <- file.path("outputs", "intermediate", "go_mapping", "merged_outputs")
+out_dir  <- file.path("outputs", "intermediate", "go_bp_enrichment")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+go_master <- read_csv(file.path(map_dir, "XP_LOC_GO_master_conversion_table_UPDATED.csv"), show_col_types = FALSE)
+deg_annot <- read_csv(file.path(map_dir, "DEG_main_contrasts_XP_LOC_conversion_table_UPDATED.csv"), show_col_types = FALSE)
+
+TERM2GENE <- go_master %>% filter(Aspect %in% c("BP", "P")) %>% select(GO_ID, xp_base) %>% distinct()
+TERM2NAME <- TERM2GENE %>% distinct(GO_ID) %>% mutate(name = GO_ID)
+
+contrast_tbl <- tribble(
+  ~genotype,      ~contrast,                    ~label,
+  "Broccolini",   "ESP_vs_Control",            "Broccolini | ESP",
+  "Broccolini",   "MSP_vs_Control",            "Broccolini | MSP",
+  "Broccoli",     "MSP_vs_Control",            "Broccoli | MSP",
+  "GaiLan",       "Spore_adhesion_vs_Control", "Gai-lan | Spore adhesion",
+  "GaiLan",       "ESP_vs_Control",            "Gai-lan | ESP",
+  "GaiLan",       "MSP_vs_Control",            "Gai-lan | MSP"
+)
+
+run_one_enrichment <- function(genotype, contrast, label) {
+  sig_df <- deg_annot %>% filter(genotype == !!genotype, contrast == !!contrast, !is.na(padj), padj < 0.05, abs(log2FoldChange) > 1)
+  full_df <- read_csv(file.path(base_dir, genotype, paste0(genotype, "_", contrast, ".csv")), show_col_types = FALSE) %>%
+    mutate(xp_base = str_extract(gene, "XP_[0-9]+"))
+  universe_genes <- full_df %>% filter(!is.na(xp_base)) %>% pull(xp_base) %>% unique() %>% intersect(unique(TERM2GENE$xp_base))
+  sig_genes <- sig_df %>% filter(!is.na(xp_base)) %>% pull(xp_base) %>% unique() %>% intersect(unique(TERM2GENE$xp_base))
+  if (length(sig_genes) < 20) return(NULL)
+  ego <- enricher(gene = sig_genes, universe = universe_genes, TERM2GENE = TERM2GENE, TERM2NAME = TERM2NAME,
+                  pvalueCutoff = 0.05, pAdjustMethod = "BH", qvalueCutoff = 0.2, minGSSize = 5, maxGSSize = 500)
+  if (is.null(ego)) return(NULL)
+  ego_df <- as.data.frame(ego)
+  if (nrow(ego_df) == 0) return(NULL)
+  as_tibble(ego_df) %>% mutate(genotype = genotype, contrast = contrast, contrast_label = label)
+}
+
+enrich_all <- pmap_dfr(contrast_tbl, run_one_enrichment)
+write_csv(enrich_all, file.path(out_dir, "11_GO_BP_enrichment_results.csv"))

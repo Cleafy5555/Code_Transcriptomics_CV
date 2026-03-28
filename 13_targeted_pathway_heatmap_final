@@ -1,0 +1,151 @@
+# ============================================================================
+# Chapter 3 | Final targeted pathway heatmap
+# ============================================================================
+# Purpose:
+# - Combine the selected target genes into a single log2FC heatmap.
+# - Apply the final row groupings and column order used in the thesis figure.
+# - Export publication-ready PNG/PDF heatmaps and the final selected gene list.
+#
+# Main inputs:
+# - targeted candidate lists from Script 12
+# - updated DEG annotation table
+#
+# Main outputs:
+# - final targeted pathway heatmap
+# - final selected gene list used in the figure
+#
+# Notes:
+# - The final gene set is manually curated from the candidate pool.
+# - Missing contrasts are filled with zero to keep a fixed matrix layout.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+infile <- file.path("outputs", "intermediate", "go_mapping", "merged_outputs", "DEG_main_contrasts_XP_LOC_conversion_table_UPDATED.csv")
+out_dir <- file.path("outputs", "figures")
+stat_dir <- file.path("outputs", "stats")
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(stat_dir, recursive = TRUE, showWarnings = FALSE)
+
+cand <- read_csv(infile, show_col_types = FALSE)
+
+selected_genes <- tibble::tribble(
+  ~xp_base,      ~pathway,                               ~short_label,
+  "XP_013597423","Hormone and defence signalling",       "WRKY19",
+  "XP_013634671","Hormone and defence signalling",       "CHB4-like",
+  "XP_013584393","Hormone and defence signalling",       "Chitinase10",
+  "XP_013625851","Hormone and defence signalling",       "CH25-like",
+  "XP_013602751","Hormone and defence signalling",       "JOMT",
+  "XP_013621517","Hormone and defence signalling",       "JOMT-like",
+  "XP_013603390","Hormone and defence signalling",       "ERF094-like",
+  "XP_013625666","Hormone and defence signalling",       "PYL4-like",
+  "XP_013619443","Cell wall remodelling / CAZymes",      "Expansin-A17a",
+  "XP_013627153","Cell wall remodelling / CAZymes",      "Expansin-A17b",
+  "XP_013596339","Cell wall remodelling / CAZymes",      "XTH14-like",
+  "XP_013626264","Cell wall remodelling / CAZymes",      "PeroxidaseP7",
+  "XP_013625640","Cell wall remodelling / CAZymes",      "Peroxidase2",
+  "XP_013603753","Cell wall remodelling / CAZymes",      "Peroxidase10",
+  "XP_013637180","Cell wall remodelling / CAZymes",      "Peroxidase27-X1",
+  "XP_013637253","Cell wall remodelling / CAZymes",      "Peroxidase27-X2",
+  "XP_013602596","Cell wall remodelling / CAZymes",      "Pectinesterase8",
+  "XP_013638784","Cell wall remodelling / CAZymes",      "PGIP1-like",
+  "XP_013611675","Cell wall remodelling / CAZymes",      "PectateLyase11",
+  "XP_013623270","Cell wall remodelling / CAZymes",      "Endoglucanase15",
+  "XP_013606174","Cell wall remodelling / CAZymes",      "Polygalacturonase",
+  "XP_013616010","Cytoskeleton organisation",            "ActinRP9",
+  "XP_013609875","Cytoskeleton organisation",            "ADF8",
+  "XP_013630673","Cytoskeleton organisation",            "Formin20",
+  "XP_013631342","Cytoskeleton organisation",            "ActinBind2",
+  "XP_013593854","Cytoskeleton organisation",            "MAP70-2",
+  "XP_013608201","Cytoskeleton organisation",            "KIN12B",
+  "XP_013613582","Transport / nutrient-associated",      "NIPA6",
+  "XP_013626559","Transport / nutrient-associated",      "VIT2.1",
+  "XP_013591881","Transport / nutrient-associated",      "ABCG37",
+  "XP_013612073","Transport / nutrient-associated",      "GalSucGT6",
+  "XP_013587892","Transport / nutrient-associated",      "SulfateT1.2-X2",
+  "XP_013587889","Transport / nutrient-associated",      "SulfateT1.2-X1",
+  "XP_013609896","Transport / nutrient-associated",      "PhosphateT1-3a",
+  "XP_013599550","Transport / nutrient-associated",      "PhosphateT1-3b"
+)
+
+plot_df <- cand %>%
+  mutate(genotype = recode(genotype, "GaiLan" = "Gai-lan"),
+         contrast = factor(contrast, levels = c("Spore_adhesion_vs_Control", "ESP_vs_Control", "MSP_vs_Control"))) %>%
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) > 1) %>%
+  inner_join(selected_genes, by = "xp_base") %>%
+  transmute(pathway = pathway.y, xp_base, short_label, genotype, contrast, log2FoldChange) %>%
+  group_by(pathway, xp_base, short_label, genotype, contrast) %>%
+  summarise(log2FoldChange = mean(log2FoldChange, na.rm = TRUE), .groups = "drop") %>%
+  mutate(col_id = paste(genotype, contrast, sep = " | "))
+
+col_order <- c(
+  "Broccolini | Spore_adhesion_vs_Control", "Broccoli | Spore_adhesion_vs_Control", "Gai-lan | Spore_adhesion_vs_Control",
+  "Broccolini | ESP_vs_Control",            "Broccoli | ESP_vs_Control",            "Gai-lan | ESP_vs_Control",
+  "Broccolini | MSP_vs_Control",            "Broccoli | MSP_vs_Control",            "Gai-lan | MSP_vs_Control"
+)
+
+nice_cols <- c(
+  "Broccolini | Spore_adhesion_vs_Control" = "Broc_Sp",
+  "Broccoli | Spore_adhesion_vs_Control"   = "Brcc_Sp",
+  "Gai-lan | Spore_adhesion_vs_Control"    = "GL_Sp",
+  "Broccolini | ESP_vs_Control"            = "Broc_ESP",
+  "Broccoli | ESP_vs_Control"              = "Brcc_ESP",
+  "Gai-lan | ESP_vs_Control"               = "GL_ESP",
+  "Broccolini | MSP_vs_Control"            = "Broc_MSP",
+  "Broccoli | MSP_vs_Control"              = "Brcc_MSP",
+  "Gai-lan | MSP_vs_Control"               = "GL_MSP"
+)
+
+row_info <- selected_genes %>% select(pathway, short_label) %>% distinct()
+heat_wide <- plot_df %>% select(pathway, short_label, col_id, log2FoldChange) %>% distinct() %>% pivot_wider(names_from = col_id, values_from = log2FoldChange)
+heat_wide2 <- row_info %>% left_join(heat_wide, by = c("pathway", "short_label"))
+
+mat <- heat_wide2 %>% column_to_rownames("short_label") %>% select(-pathway) %>% as.matrix()
+missing_cols <- setdiff(col_order, colnames(mat))
+if (length(missing_cols) > 0) {
+  zero_mat <- matrix(0, nrow = nrow(mat), ncol = length(missing_cols), dimnames = list(rownames(mat), missing_cols))
+  mat <- cbind(mat, zero_mat)
+}
+mat <- as.matrix(mat)
+storage.mode(mat) <- "numeric"
+mat <- mat[, col_order, drop = FALSE]
+mat[is.na(mat)] <- 0
+colnames(mat) <- nice_cols[colnames(mat)]
+
+row_split <- factor(heat_wide2$pathway, levels = c("Hormone and defence signalling", "Cell wall remodelling / CAZymes", "Cytoskeleton organisation", "Transport / nutrient-associated"))
+col_fun <- circlize::colorRamp2(c(-4, 0, 4), c("#2B6CB0", "#F5F3EF", "#D73027"))
+top_stage <- c("Spore", "Spore", "Spore", "ESP", "ESP", "ESP", "MSP", "MSP", "MSP")
+
+top_ha <- HeatmapAnnotation(Stage = anno_text(top_stage, rot = 0, gp = gpar(fontsize = 10, fontface = "bold")), show_annotation_name = FALSE, annotation_height = unit(6, "mm"))
+bottom_ha <- HeatmapAnnotation(Genotype = anno_text(colnames(mat), rot = 45, just = "right", gp = gpar(fontsize = 9)), show_annotation_name = FALSE, annotation_height = unit(12, "mm"))
+
+ht <- Heatmap(mat, name = "log2FC", col = col_fun, cluster_rows = FALSE, cluster_columns = FALSE,
+              row_split = row_split, row_gap = unit(4, "mm"),
+              column_split = factor(c("Spore", "Spore", "Spore", "ESP", "ESP", "ESP", "MSP", "MSP", "MSP"), levels = c("Spore", "ESP", "MSP")),
+              column_gap = unit(2, "mm"), show_row_names = TRUE, row_names_side = "right",
+              row_names_gp = gpar(fontsize = 10), show_column_names = FALSE,
+              top_annotation = top_ha, bottom_annotation = bottom_ha,
+              rect_gp = gpar(col = NA), border = FALSE,
+              row_title_gp = gpar(fontsize = 12, fontface = "bold"))
+
+png(file.path(out_dir, "13_figure5_targeted_pathway_heatmap.png"), width = 2800, height = 4600, res = 300)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+pdf(file.path(out_dir, "13_figure5_targeted_pathway_heatmap.pdf"), width = 10.5, height = 16)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+write_csv(selected_genes, file.path(stat_dir, "13_figure5_selected_genes.csv"))

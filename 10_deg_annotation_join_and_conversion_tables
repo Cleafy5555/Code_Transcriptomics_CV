@@ -1,0 +1,63 @@
+# ============================================================================
+# Chapter 3 | Join DEG tables to annotation and build conversion outputs
+# ============================================================================
+# Purpose:
+# - Link significant DEG sets to XP/LOC/protein description metadata.
+# - Build conversion tables that make later manual interpretation easier.
+# - Export lookup tables used in the targeted pathway and supplementary table workflows.
+#
+# Main inputs:
+# - DEG tables from Script 01
+# - mapping tables from Scripts 08 and 09
+#
+# Main outputs:
+# - DEG conversion tables and lookup tables for annotation review.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(purrr)
+  library(tibble)
+})
+
+base_dir <- file.path("outputs", "intermediate", "host_deseq_within_genotype", "chosen_analysis")
+map_dir <- file.path("outputs", "intermediate", "go_mapping")
+merged_dir <- file.path(map_dir, "merged_outputs")
+dir.create(merged_dir, recursive = TRUE, showWarnings = FALSE)
+
+xp_lookup <- read_csv(file.path(map_dir, "XP_to_LOC_conversion_table.csv"), show_col_types = FALSE)
+if (file.exists(file.path(merged_dir, "XP_LOC_GO_master_conversion_table_UPDATED.csv"))) {
+  go_master <- read_csv(file.path(merged_dir, "XP_LOC_GO_master_conversion_table_UPDATED.csv"), show_col_types = FALSE)
+} else {
+  go_master <- read_csv(file.path(map_dir, "XP_LOC_GO_master_conversion_table.csv"), show_col_types = FALSE)
+}
+
+contrast_tbl <- tribble(
+  ~genotype,      ~contrast,
+  "Broccolini",   "ESP_vs_Control",
+  "Broccolini",   "MSP_vs_Control",
+  "Broccoli",     "ESP_vs_Control",
+  "Broccoli",     "MSP_vs_Control",
+  "GaiLan",       "Spore_adhesion_vs_Control",
+  "GaiLan",       "ESP_vs_Control",
+  "GaiLan",       "MSP_vs_Control"
+)
+
+deg_conversion_all <- pmap_dfr(contrast_tbl, function(genotype, contrast) {
+  sig_file <- file.path(base_dir, genotype, paste0(genotype, "_", contrast, "_sig.csv"))
+  read_csv(sig_file, show_col_types = FALSE) %>%
+    mutate(genotype = genotype, contrast = contrast,
+           xp_id = str_extract(gene, "XP_[0-9]+\\.[0-9]+"),
+           xp_base = str_extract(gene, "XP_[0-9]+")) %>%
+    left_join(xp_lookup, by = c("xp_base")) %>%
+    left_join(go_master, by = c("xp_base", "xp_id", "loc_id", "protein_description"), relationship = "many-to-many")
+})
+
+write_csv(deg_conversion_all, file.path(merged_dir, "DEG_main_contrasts_XP_LOC_conversion_table_UPDATED.csv"))

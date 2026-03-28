@@ -1,0 +1,169 @@
+# ============================================================================
+# Chapter 3 | Exploratory pathogen-side transcript analysis
+# ============================================================================
+# Purpose:
+# - Rebuild the pathogen-side count matrix from the same CLC exports used for host analysis.
+# - Keep only pathogen genes (PBTT_ features).
+# - Normalise and variance-stabilise the pathogen counts.
+# - Produce exploratory PCA, clustering, group-average expression summaries, and heatmaps.
+# - Save intermediate tables used in the later pathogen figure scripts.
+#
+# Main inputs:
+# - data/raw/CLC_counts/*.csv
+#
+# Main outputs:
+# - pathogen exploratory PCA tables and plots
+# - pathogen gene variance rankings
+# - pathogen cluster assignments and heatmaps
+# - sample QC summaries
+#
+# Notes:
+# - This is explicitly exploratory and is kept separate from the host DESeq2 workflow.
+#
+# Repository note:
+# - This repository contains cleaned analysis code only.
+# - Raw sequencing/count files and large external annotation resources are not included.
+# - Scripts generally assume earlier steps have already produced the intermediate files they read.
+# {'='*76}
+
+
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(dplyr)
+  library(readr)
+  library(stringr)
+  library(tibble)
+  library(purrr)
+  library(ggplot2)
+  library(pheatmap)
+})
+
+count_dir <- file.path("data", "raw", "CLC_counts")
+base_out <- file.path("outputs", "intermediate", "pathogen_exploratory")
+dir.create(base_out, recursive = TRUE, showWarnings = FALSE)
+
+files_all <- list.files(count_dir, pattern = "\\.csv$", full.names = TRUE)
+stopifnot(length(files_all) > 0)
+sample_names_all <- tools::file_path_sans_ext(basename(files_all))
+
+read_clc_counts <- function(file) {
+  sample_name <- tools::file_path_sans_ext(basename(file))
+  df <- read_csv(file, show_col_types = FALSE) %>% as_tibble()
+  needed <- c("Name", "Total gene reads")
+  if (!all(needed %in% names(df))) stop("Missing required columns in: ", basename(file))
+  df <- df %>% select(Name, `Total gene reads`)
+  names(df)[2] <- sample_name
+  df
+}
+count_list_all <- lapply(files_all, read_clc_counts); names(count_list_all) <- sample_names_all
+
+parse_sample_name <- function(x) {
+  is_extra <- str_detect(x, "_extra$")
+  x_base <- str_remove(x, "_extra$")
+  if (str_detect(x_base, "^A[BIK][0-9]+$")) {
+    m <- str_match(x_base, "^A([BIK])([0-9]+)$")
+    tibble(sample = x, sample_base = x_base, is_extra = is_extra, inoc_status = "Control", dpi_raw = NA_integer_, genotype_code = m[, 2], replicate = as.integer(m[, 3]))
+  } else if (str_detect(x_base, "^[0-9]+[BIK][0-9]+$")) {
+    m <- str_match(x_base, "^([0-9]+)([BIK])([0-9]+)$")
+    tibble(sample = x, sample_base = x_base, is_extra = is_extra, inoc_status = "Inoculated", dpi_raw = as.integer(m[, 2]), genotype_code = m[, 3], replicate = as.integer(m[, 4]))
+  } else stop("Sample name does not match expected pattern: ", x)
+}
+
+sample_info_all <- bind_rows(lapply(sample_names_all, parse_sample_name)) %>%
+  mutate(genotype = recode(genotype_code, "B" = "Broccolini", "I" = "Broccoli", "K" = "GaiLan"))
+control_dpi_map <- tribble(~genotype_code, ~control_dpi, "B", 1, "I", 2, "K", 7)
+stage_map <- tribble(
+  ~genotype_code, ~dpi, ~stage,
+  "B", 1,  "Spore_adhesion",
+  "B", 13, "ESP",
+  "B", 22, "MSP",
+  "I", 2,  "Spore_adhesion",
+  "I", 16, "ESP",
+  "I", 25, "MSP",
+  "K", 7,  "Spore_adhesion",
+  "K", 22, "ESP",
+  "K", 28, "MSP"
+)
+sample_info_all <- sample_info_all %>% left_join(control_dpi_map, by = "genotype_code") %>% mutate(dpi = if_else(inoc_status == "Control", control_dpi, dpi_raw)) %>% left_join(stage_map, by = c("genotype_code", "dpi")) %>% mutate(stage = if_else(inoc_status == "Control", "Control", stage))
+
+build_counts_matrix <- function(selected_samples, count_list_all) {
+  count_list <- count_list_all[selected_samples]
+  counts_merged <- reduce(count_list, full_join, by = "Name")
+  counts_merged[is.na(counts_merged)] <- 0
+  counts_merged <- counts_merged %>% filter(str_detect(Name, "^PBTT_"))
+  counts_df <- as.data.frame(counts_merged)
+  rownames(counts_df) <- counts_df$Name
+  counts_matrix <- as.matrix(counts_df[, -1, drop = FALSE]); mode(counts_matrix) <- "integer"
+  counts_matrix[rowSums(counts_matrix) > 0, , drop = FALSE]
+}
+
+get_selected_samples <- function(sample_info_all, exclude_extra = TRUE, drop_samples = NULL, use_7K_extra_instead = FALSE) {
+  meta <- sample_info_all
+  if (exclude_extra) meta <- meta %>% filter(!is_extra)
+  if (use_7K_extra_instead) {
+    non_7K <- sample_info_all %>% filter(!(genotype_code == "K" & inoc_status == "Inoculated" & dpi == 7))
+    only_7K_extra <- sample_info_all %>% filter(genotype_code == "K", inoc_status == "Inoculated", dpi == 7, is_extra)
+    meta <- bind_rows(non_7K, only_7K_extra)
+  }
+  if (!is.null(drop_samples) && length(drop_samples) > 0) meta <- meta %>% filter(!sample %in% drop_samples)
+  meta %>% arrange(genotype, stage, replicate, sample)
+}
+
+run_pathogen_exploration <- function(sample_info, counts_matrix, out_dir, min_count = 10, min_samples = 2, top_n = 100, k_clusters = 4) {
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  meta <- sample_info %>% filter(inoc_status == "Inoculated") %>% mutate(genotype = factor(genotype, levels = c("Broccolini", "Broccoli", "GaiLan")), stage = factor(stage, levels = c("Spore_adhesion", "ESP", "MSP"))) %>% arrange(genotype, stage, replicate, sample)
+  counts_use <- counts_matrix[, meta$sample, drop = FALSE]
+  dds <- DESeqDataSetFromMatrix(countData = counts_use, colData = as.data.frame(meta), design = ~ genotype + stage)
+  keep <- rowSums(counts(dds) >= min_count) >= min_samples
+  dds <- dds[keep, ]
+  dds <- estimateSizeFactors(dds, type = "poscounts")
+  norm_counts <- counts(dds, normalized = TRUE)
+  vsd <- varianceStabilizingTransformation(dds, blind = TRUE)
+  vst_mat <- assay(vsd)
+  write.csv(meta, file.path(out_dir, "sample_metadata_inoculated_only.csv"), row.names = FALSE)
+  write.csv(as.data.frame(norm_counts) %>% tibble::rownames_to_column("gene"), file.path(out_dir, "pathogen_normalized_counts.csv"), row.names = FALSE)
+  write.csv(as.data.frame(vst_mat) %>% tibble::rownames_to_column("gene"), file.path(out_dir, "pathogen_vst_counts.csv"), row.names = FALSE)
+  qc_tbl <- tibble(sample = colnames(counts_use), pathogen_total_raw_reads = colSums(counts_use), pathogen_detected_genes_raw = colSums(counts_use > 0), pathogen_total_normalized = colSums(norm_counts), pathogen_detected_genes_norm_gt1 = colSums(norm_counts > 1)) %>% left_join(meta %>% select(sample, genotype, stage, dpi, replicate), by = "sample")
+  write.csv(qc_tbl, file.path(out_dir, "pathogen_sample_qc_summary.csv"), row.names = FALSE)
+  pca_df <- plotPCA(vsd, intgroup = c("genotype", "stage"), returnData = TRUE)
+  percentVar <- round(100 * attr(pca_df, "percentVar"))
+  pca_df <- pca_df %>% left_join(meta %>% select(name = sample, dpi, replicate), by = "name")
+  p_pca <- ggplot(pca_df, aes(PC1, PC2, colour = genotype, shape = stage, label = name)) + geom_point(size = 3) + geom_text(vjust = -0.8, size = 3) + labs(title = "Pathogen PCA (inoculated samples only)", x = paste0("PC1: ", percentVar[1], "% variance"), y = paste0("PC2: ", percentVar[2], "% variance")) + theme_bw(base_size = 12)
+  ggsave(file.path(out_dir, "pathogen_PCA.png"), plot = p_pca, width = 7, height = 5, dpi = 300)
+  write.csv(pca_df, file.path(out_dir, "pathogen_PCA_data.csv"), row.names = FALSE)
+  meta$group <- paste(meta$genotype, meta$stage, sep = "_")
+  desired_groups <- c("Broccolini_Spore_adhesion", "Broccolini_ESP", "Broccolini_MSP", "Broccoli_Spore_adhesion", "Broccoli_ESP", "Broccoli_MSP", "GaiLan_Spore_adhesion", "GaiLan_ESP", "GaiLan_MSP")
+  desired_groups <- desired_groups[desired_groups %in% unique(meta$group)]
+  avg_mat <- sapply(desired_groups, function(g) rowMeans(vst_mat[, meta$group == g, drop = FALSE], na.rm = TRUE))
+  avg_mat <- as.matrix(avg_mat)
+  write.csv(as.data.frame(avg_mat) %>% tibble::rownames_to_column("gene"), file.path(out_dir, "pathogen_group_average_vst.csv"), row.names = FALSE)
+  gene_var <- apply(avg_mat, 1, var, na.rm = TRUE)
+  var_tbl <- tibble(gene = names(gene_var), variance_across_groups = gene_var) %>% arrange(desc(variance_across_groups))
+  write.csv(var_tbl, file.path(out_dir, "pathogen_gene_variance_ranked.csv"), row.names = FALSE)
+  top_n_use <- min(top_n, nrow(var_tbl)); top_genes <- var_tbl$gene[seq_len(top_n_use)]
+  heat_mat <- avg_mat[top_genes, , drop = FALSE]
+  heat_mat_z <- t(scale(t(heat_mat))); heat_mat_z <- heat_mat_z[complete.cases(heat_mat_z), , drop = FALSE]
+  write.csv(as.data.frame(heat_mat_z) %>% tibble::rownames_to_column("gene"), file.path(out_dir, "pathogen_top_variable_genes_zscore.csv"), row.names = FALSE)
+  set.seed(123); k_use <- min(k_clusters, nrow(heat_mat_z)); km <- kmeans(heat_mat_z, centers = k_use, nstart = 50)
+  cluster_tbl <- tibble(gene = rownames(heat_mat_z), cluster = paste0("Cluster_", km$cluster)) %>% left_join(var_tbl, by = "gene") %>% arrange(cluster, desc(variance_across_groups))
+  write.csv(cluster_tbl, file.path(out_dir, "pathogen_gene_clusters.csv"), row.names = FALSE)
+  top_per_cluster <- cluster_tbl %>% group_by(cluster) %>% slice_max(order_by = variance_across_groups, n = 15, with_ties = FALSE) %>% ungroup()
+  write.csv(top_per_cluster, file.path(out_dir, "pathogen_top15_genes_per_cluster.csv"), row.names = FALSE)
+}
+
+run_scenario <- function(run_name, exclude_extra = FALSE, drop_samples = c("2I5"), use_7K_extra_instead = TRUE, top_n = 100, k_clusters = 4) {
+  out_dir <- file.path(base_out, run_name)
+  dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+  sample_info <- get_selected_samples(sample_info_all, exclude_extra, drop_samples, use_7K_extra_instead) %>%
+    filter(!is.na(stage)) %>%
+    mutate(genotype = factor(genotype, levels = c("Broccolini", "Broccoli", "GaiLan")), inoc_status = factor(inoc_status, levels = c("Control", "Inoculated")), stage = factor(stage, levels = c("Control", "Spore_adhesion", "ESP", "MSP")))
+  counts_matrix <- build_counts_matrix(sample_info$sample, count_list_all)
+  counts_matrix <- counts_matrix[, sample_info$sample, drop = FALSE]
+  write.csv(sample_info, file.path(out_dir, "sample_metadata_all_selected.csv"), row.names = FALSE)
+  write.csv(as.data.frame(counts_matrix) %>% tibble::rownames_to_column("gene"), file.path(out_dir, "counts_matrix_merged.csv"), row.names = FALSE)
+  capture.output(print(table(sample_info$genotype, sample_info$stage)), file = file.path(out_dir, "sample_table.txt"))
+  run_pathogen_exploration(sample_info, counts_matrix, out_dir, min_count = 10, min_samples = 2, top_n = top_n, k_clusters = k_clusters)
+}
+
+run_pathogen <- run_scenario(run_name = "chosen_analysis_pathogen_exploratory", exclude_extra = FALSE, drop_samples = c("2I5"), use_7K_extra_instead = TRUE, top_n = 100, k_clusters = 4)
